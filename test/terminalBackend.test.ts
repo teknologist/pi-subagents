@@ -1,7 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTmuxTerminalBackend } from "../src/subagent/terminalBackend.js";
+import { createDefaultCommandRunner, createTmuxTerminalBackend } from "../src/subagent/terminalBackend.js";
+
+test("command runner distinguishes local timeouts, aborts, and real failures", async () => {
+  const runner = createDefaultCommandRunner();
+  await assert.rejects(
+    runner.run(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 100 }),
+    (error: Error & { timedOut?: boolean; cause?: { killed?: boolean; signal?: string } }) => {
+      assert.equal(error.timedOut, true);
+      assert.equal(error.cause?.killed, true);
+      assert.equal(error.cause?.signal, "SIGTERM");
+      return true;
+    },
+  );
+  const controller = new AbortController();
+  const aborted = runner.run(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 1000, signal: controller.signal });
+  controller.abort();
+  await assert.rejects(aborted, (error: Error & { timedOut?: boolean }) => {
+    assert.equal(error.timedOut, false);
+    return true;
+  });
+  await assert.rejects(runner.run(process.execPath, ["-e", "process.exit(7)"], { timeoutMs: 1000 }), (error: Error & { timedOut?: boolean; exitCode?: number }) => {
+    assert.equal(error.timedOut, false);
+    assert.equal(error.exitCode, 7);
+    return true;
+  });
+});
 
 test("tmux terminal backend preserves the launch handle contract", async () => {
   const calls: string[][] = [];

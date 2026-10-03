@@ -337,26 +337,6 @@ async function waitForRetryTransition(
   }
 }
 
-async function verifyPromptTimeout(
-  run: HerdrRun,
-  promptIdentity: HerdrAgentInfo,
-): Promise<void> {
-  let current: HerdrAgentInfo;
-  try {
-    current = await readAgent(run, promptIdentity.pane_id);
-  } catch (error) {
-    throw new HerdrIdentityError(
-      `HerdR could not verify prompt timeout identity: ${errorText(error)}`,
-    );
-  }
-  assertSameAgentIdentity(promptIdentity, current);
-  if (current.state_change_seq <= promptIdentity.state_change_seq) {
-    throw new Error(
-      `HerdR prompt timeout did not prove activity for ${promptIdentity.pane_id}`,
-    );
-  }
-}
-
 async function retryStalledPrompt(
   run: HerdrRun,
   promptIdentity: HerdrAgentInfo,
@@ -461,9 +441,13 @@ async function submitInitialPrompt(
       String(promptTimeoutMs),
     ]);
   } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
     const code = herdrError(error)?.code;
-    if (code === "timeout") {
-      await verifyPromptTimeout(run, identity);
+    if (code === "timeout" || (error instanceof Error && "timedOut" in error && error.timedOut === true)) {
+      // The acknowledgement can fail after delivery. Never resend the prompt.
+      await waitForRetryTransition(
+        run, identity, identity.state_change_seq, retryTimeoutMs, retryPollMs, signal,
+      );
       return;
     }
     if (code === "agent_prompt_stalled") {
@@ -866,7 +850,7 @@ export function createHerdrTerminalBackend(
         } catch (error) {
           if (!(error instanceof HerdrIdentityError)) {
             await closeCreatedResource(
-              launchRun,
+              run,
               workspace,
               created,
               expectedAgent,
