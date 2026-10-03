@@ -15,8 +15,8 @@ export function taskParametersSchema() {
         workspace_group: Type.Optional(Type.String({
           description: "Shared terminal workspace group. HerdR creates a dedicated workspace by default.",
         })),
-        herdr_layout: Type.Optional(Type.Literal("attached", {
-          description: "With workspace_group on HerdR, keep the parent in the left half and grid children in the right half; ignored by tmux and SDK backends.",
+        herdr_layout: Type.Optional(Type.Union([Type.Literal("attached"), Type.Literal("tab")], {
+          description: "HerdR placement: attached requires workspace_group and grids children beside the parent; tab opens each child in a new tab in the parent's workspace and cannot use workspace_group. Omit for existing split placement. Ignored by tmux and SDK backends.",
         })),
         isolation: Type.Optional(Type.Literal("worktree", {
           description: "Run writes in an isolated Git worktree. Changed worktrees are retained and returned; unchanged worktrees are removed.",

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { chooseTmuxSplitDirection } from "../helpers.js";
 
 export type TerminalBackendKind = "tmux" | "herdr";
-export type HerdrLayout = "attached";
+export type HerdrLayout = "attached" | "tab";
 export type ExecutionBackendKind = "sdk" | TerminalBackendKind;
 export type RequestedBackendKind = "auto" | ExecutionBackendKind;
 

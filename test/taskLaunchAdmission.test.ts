@@ -254,3 +254,35 @@ test("worktree isolation is created from the selected repository", async () => {
     rmSync(target, { recursive: true, force: true });
   }
 });
+
+
+test("tmux tasks ignore tab placement even with workspace grouping", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-tab-tmux-"));
+  const oldPath = process.env.PATH;
+  const oldTmux = process.env.TMUX;
+  const oldBackend = process.env.PI_TASK_BACKEND;
+  let shutdown = () => undefined;
+  try {
+    installExploreProfile(root);
+    process.env.PATH = `${installFakeTmux(root)}:${oldPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+    const registered = registerTaskTool();
+    shutdown = registered.shutdown;
+    const result = await registered.tool.execute("tab-tmux", {
+      agent_type: "explore", prompt: "Inspect", description: "Tab ignored",
+      background: true, herdr_layout: "tab", workspace_group: "group",
+    }, undefined, undefined, { cwd: root });
+    assert.equal(result.isError, undefined);
+    assert.ok(result.details?.task_id);
+    const registry = JSON.parse(readFileSync(join(root, ".pi", "task-registry.json"), "utf8"));
+    assert.equal(registry.length, 1);
+    assert.equal(registry[0].handle.backend, "tmux");
+  } finally {
+    shutdown();
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (oldTmux === undefined) delete process.env.TMUX; else process.env.TMUX = oldTmux;
+    if (oldBackend === undefined) delete process.env.PI_TASK_BACKEND; else process.env.PI_TASK_BACKEND = oldBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
