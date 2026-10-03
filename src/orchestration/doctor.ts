@@ -1,5 +1,6 @@
 import { existsSync, type Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { claimsConflict, listActiveResourceLeases } from "./claims.js";
 import { loadContextPack } from "./context.js";
@@ -198,7 +199,12 @@ async function validateRuntimeParity(
   // is a valid architecture. The wrapper and packaged runtime are provided by
   // the pinned package, so the embedded-source wiring checks below do not apply
   // and must not be flagged as runtime-wrapper-missing/packaged-runtime-drift.
-  const externallyProvidedRuntime = hasPiSubagentsPackage(packages);
+  // Pi also loads packages from its global agent settings, so a user-level
+  // install (e.g. git:github.com/<owner>/pi-subagents@main) counts as well.
+  const globalSettings = await readJson(join(piAgentDirectory(), "settings.json"));
+  const externallyProvidedRuntime =
+    hasPiSubagentsPackage(packages) ||
+    (isRecord(globalSettings) && hasPiSubagentsPackage(globalSettings.packages));
 
   if (!externallyProvidedRuntime && !existsSync(liveEntryPath)) {
     issues.push({
@@ -242,8 +248,15 @@ function hasPiSubagentsPackage(packages: unknown): boolean {
     (entry) =>
       typeof entry === "string" &&
       (entry.includes("@minhduydev/pi-subagents") ||
-        /\/pi-subagents\//u.test(entry)),
+        /\/pi-subagents(?:[/@]|$)/u.test(entry)),
   );
+}
+
+function piAgentDirectory(): string {
+  // Mirrors Pi's getAgentDir(): PI_CODING_AGENT_DIR overrides ~/.pi/agent.
+  const override = process.env.PI_CODING_AGENT_DIR;
+  if (override) return override.replace(/^~(?=$|\/)/u, homedir());
+  return join(homedir(), ".pi", "agent");
 }
 
 async function validateTaskHistory(

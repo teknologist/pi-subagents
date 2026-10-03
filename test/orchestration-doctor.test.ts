@@ -67,6 +67,34 @@ describe("orchestration doctor", () => {
     });
   });
 
+  it("treats a global Pi git install as the runtime instead of reporting wrapper drift", async () => {
+    // Pi loads packages from ~/.pi/agent/settings.json too; a project without its
+    // own wrapper must not be told the runtime is missing when the user installed it globally.
+    const projectDirectory = await createTemporaryProject();
+    await rm(join(projectDirectory, ".pi", "extensions", "task.ts"));
+    await rm(join(projectDirectory, "package"), { recursive: true });
+    const agentDirectory = await mkdtemp(join(tmpdir(), "md-harness-agent-"));
+    temporaryDirectories.push(agentDirectory);
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDirectory;
+    const parityCodes = async () =>
+      (await runOrchestrationDoctor({ projectDirectory })).issues
+        .map((issue) => issue.code)
+        .filter((code) => code === "runtime-wrapper-missing" || code === "packaged-runtime-drift");
+    try {
+      expect(await parityCodes()).toEqual(["runtime-wrapper-missing", "packaged-runtime-drift"]);
+      await writeFile(
+        join(agentDirectory, "settings.json"),
+        JSON.stringify({ packages: ["git:github.com/teknologist/pi-subagents@main"] }),
+        "utf8",
+      );
+      expect(await parityCodes()).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  });
+
   it("accepts a governed-outcome contract without a verification recipe", async () => {
     const projectDirectory = await createTemporaryProject();
     const governedDelegationPrompt = `
