@@ -1075,7 +1075,9 @@ export default function (pi: ExtensionAPI) {
         } else if (selectedBackend === "tmux") {
           setPaneSelfDestruct(paneId, true);
         }
-      } catch {
+      } catch (launchError) {
+        const launchReason =
+          launchError instanceof Error ? launchError.message : String(launchError);
         foregroundTasks.delete(id);
         clearTaskWidgetIfIdle();
         if (worktree && !resumeWorktree) {
@@ -1089,10 +1091,13 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text" as const,
-              text: `Failed to create ${selectedBackend} execution pane for the agent.`,
+              text: `Failed to create ${selectedBackend} execution pane for the agent: ${launchReason}`,
             },
           ],
-          details: { phase: "failed" as const, error: `${selectedBackend} launch failed` },
+          details: {
+            phase: "failed" as const,
+            error: `${selectedBackend} launch failed: ${launchReason}`,
+          },
           isError: true,
         };
       }
