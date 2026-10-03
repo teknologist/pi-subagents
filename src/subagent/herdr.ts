@@ -363,12 +363,6 @@ async function retryStalledPrompt(
   pollMs: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  const stalledBaseline = stalledPromptBaseline(error);
-  if (stalledBaseline === undefined) {
-    throw new HerdrIdentityError(
-      "HerdR stalled prompt did not include HerdR's state sequence baseline",
-    );
-  }
   let beforeRetry: HerdrAgentInfo;
   try {
     beforeRetry = await readAgent(run, promptIdentity.pane_id);
@@ -378,6 +372,11 @@ async function retryStalledPrompt(
     );
   }
   assertSameAgentIdentity(promptIdentity, beforeRetry);
+  // Newer HerdR builds no longer append "state_change_seq remained N" to the
+  // stall message. The sequence read immediately after the stall is the same
+  // baseline: an unchanged idle agent still gets Enter, anything else waits.
+  const stalledBaseline =
+    stalledPromptBaseline(error) ?? beforeRetry.state_change_seq;
   if (beforeRetry.state_change_seq < stalledBaseline) {
     throw new HerdrIdentityError(
       `HerdR retry state sequence regressed for ${promptIdentity.pane_id}`,

@@ -585,6 +585,42 @@ test("HerdR retries only a stalled prompt and requires a newer sequence", async 
   );
 });
 
+test("HerdR resubmits a stalled prompt when the stall message omits the sequence", async () => {
+  // herdr 0.9.2 reports stalls without "state_change_seq remained N"; a slow
+  // Pi startup leaves the prompt typed but unsubmitted, so Enter must still be sent.
+  const calls: string[][] = [];
+  let retrySent = false;
+  const backend = createHerdrTerminalBackend({
+    promptTimeoutMs: 5_001,
+    retryTimeoutMs: 5,
+    retryPollMs: 1,
+    env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: "/tmp/herdr-stall-noseq.sock" },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") return { stdout: JSON.stringify({ pane: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+      if (args[0] === "agent" && args[1] === "prompt") {
+        throw Object.assign(new Error("prompt stalled"), {
+          stderr: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "agent prompt produced no observed working or blocked state within 5000 ms; current status is idle" } }),
+        });
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return { stdout: JSON.stringify({ result: { agent: { pane_id: "w1:p2", terminal_id: "term-2", name: "pi-task", agent: "pi", agent_status: retrySent ? "working" : "idle", state_change_seq: retrySent ? 331 : 330 } } }), stderr: "" };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") return processInfoResult();
+      if (args[0] === "agent" && args[1] === "send-keys") retrySent = true;
+      return { stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+    },
+  });
+
+  await backend.launch({ cwd: "/repo", agentArgs: ["task"], initialPrompt: "Review." });
+
+  assert.equal(calls.filter((args) => args[1] === "prompt").length, 1);
+  assert.deepEqual(
+    calls.find((args) => args[0] === "agent" && args[1] === "send-keys"),
+    ["agent", "send-keys", "pi-task", "enter"],
+  );
+});
+
 test("HerdR accepts an ordinary prompt timeout only after verified activity", async () => {
   const calls: string[][] = [];
   let agentGets = 0;
