@@ -130,11 +130,66 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
 
 test("public task schema exposes the opt-in attached HerdR layout", () => {
   const schema = taskParametersSchema() as {
-    properties: Record<string, { const?: string; description?: string }>;
+    properties: Record<string, { anyOf?: { const: string }[]; description?: string }>;
   };
 
-  assert.equal(schema.properties.herdr_layout?.const, "attached");
+  assert.deepEqual(schema.properties.herdr_layout?.anyOf?.map((item) => item.const), ["attached", "tab"]);
   assert.match(schema.properties.herdr_layout?.description ?? "", /workspace_group/u);
+});
+
+test("tab layout targets the parent workspace and retains pane-only ownership", async () => {
+  const calls: string[][] = [];
+  let terminalId = "child-terminal";
+  let failStart = false;
+  const child = () => ({ pane_id: "w1:p2", terminal_id: terminalId, tab_id: "w1:t2", agent: "pi" });
+  const backend = createHerdrTerminalBackend({
+    env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: "/tmp/tab.sock" },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      let result: unknown = {};
+      if (args[0] === "tab") result = { root_pane: child() };
+      if (args[0] === "pane" && args[1] === "get") {
+        result = { pane: args[2] === "w1:p1"
+          ? { pane_id: "w1:p1", terminal_id: "parent", workspace_id: "w1" }
+          : child() };
+      }
+      if (args[0] === "agent" && args[1] === "start") {
+        if (failStart) throw new Error("start failed");
+        result = { agent: { pane_id: "w1:p2", terminal_id: terminalId } };
+      }
+      if (args[1] === "read") result = { text: "task result" };
+      return { stdout: JSON.stringify({ result }), stderr: "" };
+    },
+  });
+  const input = { cwd: "/repo", herdrLayout: "tab" as const, label: "child", env: { TASK: "1" } };
+  const handle = await backend.launch(input);
+  assert.deepEqual(calls[1], ["tab", "create", "--workspace", "w1", "--cwd", "/repo", "--env", "TASK=1", "--label", "child", "--no-focus"]);
+  assert.equal(handle.backend, "herdr");
+  if (handle.backend !== "herdr") return;
+  assert.equal(handle.tabId, "w1:t2");
+  assert.equal(handle.workspaceId, undefined);
+  assert.equal(await backend.isAlive(handle), true);
+  assert.equal(await backend.readTail(handle, 10), "task result");
+  await backend.close(handle);
+  assert.deepEqual(calls.at(-1), ["pane", "close", "w1:p2"]);
+  terminalId = "replacement";
+  await assert.rejects(backend.close(handle), /ownership mismatch/);
+  const syncCalls: string[][] = [];
+  const sync = createSyncHerdrControl({ HERDR_SOCKET_PATH: "/tmp/tab.sock" }, (args) => {
+    syncCalls.push([...args]);
+    return JSON.stringify({ pane: child() });
+  });
+  assert.throws(() => sync.close(handle), /ownership mismatch/);
+  terminalId = handle.terminalId;
+  sync.close(handle);
+  assert.deepEqual(syncCalls.at(-1), ["pane", "close", "w1:p2"]);
+  const count = calls.length;
+  await assert.rejects(backend.launch({ ...input, workspaceGroup: "group" }), /cannot use workspace_group/);
+  assert.equal(calls.length, count);
+  failStart = true;
+  await assert.rejects(backend.launch(input), /start failed/);
+  assert.deepEqual(calls.at(-1), ["pane", "close", "w1:p2"]);
+  assert.ok(!calls.some((args) => args[0] === "workspace" || args[1] === "split"));
 });
 
 test("dedicated HerdR groups grow as full, columns, then a balanced 2x2 grid", async () => {

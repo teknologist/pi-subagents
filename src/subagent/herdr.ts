@@ -15,6 +15,7 @@ interface HerdrPane {
   terminal_id: string;
   agent?: string;
   tab_id?: string;
+  workspace_id?: string;
 }
 
 interface HerdrWorkspace {
@@ -688,6 +689,9 @@ export function createHerdrTerminalBackend(
         }
         const launchRun = (args: readonly string[]) =>
           run(args, { signal: input.signal, timeoutMs: input.timeoutMs });
+        if (input.herdrLayout === "tab" && input.workspaceGroup) {
+          throw new Error("HerdR tab layout cannot use workspace_group");
+        }
         if (input.herdrLayout === "attached" && !input.workspaceGroup) {
           throw new Error("HerdR attached layout requires workspace_group");
         }
@@ -750,9 +754,28 @@ export function createHerdrTerminalBackend(
           ? workspaceFrom(decode(workspaceResponse.stdout, "workspace create"))
           : undefined;
         let created: HerdrPane | undefined;
+        let tabPane: HerdrPane | undefined;
         let expectedAgent: HerdrAgentInfo | undefined;
         try {
-          if (workspace) {
+          if (input.herdrLayout === "tab") {
+            const parent = paneFrom(decode(
+              (await launchRun(["pane", "get", env.HERDR_PANE_ID])).stdout,
+              "parent pane get",
+            ));
+            if (!parent.workspace_id || parent.pane_id !== env.HERDR_PANE_ID) {
+              throw new Error("HerdR parent pane did not include its workspace_id");
+            }
+            const result = decode<{ root_pane: HerdrPane }>(
+              (await launchRun([
+                "tab", "create", "--workspace", parent.workspace_id,
+                "--cwd", input.cwd, ...terminalEnvArgs,
+                "--label", input.label ?? "pi-task", "--no-focus",
+              ])).stdout,
+              "tab create",
+            );
+            created = paneFrom({ pane: result.root_pane });
+            tabPane = created;
+          } else if (workspace) {
             const response = await runWithRetry(
               launchRun,
               ["pane", "get", workspace.root_pane_id],
@@ -804,7 +827,12 @@ export function createHerdrTerminalBackend(
           while (true) {
             try {
               const response = await launchRun(startArgs);
-              created = paneFrom(decode(response.stdout, "agent start"));
+              const started = paneFrom(decode(response.stdout, "agent start"));
+              if (tabPane && (started.pane_id !== tabPane.pane_id ||
+                  started.terminal_id !== tabPane.terminal_id)) {
+                throw new HerdrIdentityError("HerdR tab agent identity changed");
+              }
+              created = { ...created, ...started };
               break;
             } catch (error) {
               if (!isAgentPaneBusy(error) || Date.now() >= deadline) throw error;
@@ -864,7 +892,21 @@ export function createHerdrTerminalBackend(
             ...(input.herdrLayout ? { herdrLayout: input.herdrLayout } : {}),
           };
         } catch (error) {
-          if (!(error instanceof HerdrIdentityError)) {
+          if (tabPane && !(error instanceof HerdrIdentityError)) {
+            // Close only the owned pane, even if someone adds panes to the tab.
+            // Do not use the aborted launch signal for cleanup.
+            try {
+              const current = paneFrom(decode(
+                (await run(["pane", "get", tabPane.pane_id])).stdout, "pane get",
+              ));
+              if (current.terminal_id === tabPane.terminal_id) {
+                await run(["pane", "close", tabPane.pane_id]);
+              }
+            } catch {
+              // An unverified resource must remain untouched.
+            }
+          }
+          if (!tabPane && !(error instanceof HerdrIdentityError)) {
             await closeCreatedResource(
               launchRun,
               workspace,
