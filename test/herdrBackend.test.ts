@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { waitForTaskCompletion } from "../src/subagent/waitCompletion.js";
 
 import {
   createHerdrTerminalBackend,
@@ -599,6 +603,76 @@ test("HerdR accepts an ordinary prompt timeout only after verified activity", as
 
   assert.equal(calls.some((args) => args[0] === "agent" && args[1] === "send-keys"), false);
 });
+
+for (const localTimeout of [false, true]) {
+  for (const outcome of ["late", "done", "inactive", "replaced", "aborted", "failure"]) {
+    test(`HerdR acknowledgement recovery: local=${localTimeout}, outcome=${outcome}`, async () => {
+      const calls: string[][] = [];
+      const controller = new AbortController();
+      let reads = 0;
+      let prompted = false;
+      const backend = createHerdrTerminalBackend({
+        env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: "/tmp/recovery.sock" },
+        retryTimeoutMs: 30,
+        retryPollMs: 1,
+        run: async (_command, args) => {
+          calls.push([...args]);
+          const pane = { pane_id: "w1:p2", terminal_id: "term-2", agent: "pi" };
+          if (args[0] === "pane" && args[1] === "process-info") {
+            return processInfoResult("w1:p2", outcome === "replaced" && prompted ? 456 : 123);
+          }
+          if (args[0] === "agent" && args[1] === "get") {
+            reads++;
+            const active = outcome === "done" ? reads > 1 : reads > 2;
+            return { stdout: JSON.stringify({ agent: {
+              ...pane, name: "pi-task",
+              agent_status: active ? (outcome === "done" ? "idle" : "working") : "idle",
+              state_change_seq: active && outcome !== "inactive" ? 12 : 10,
+            } }), stderr: "" };
+          }
+          if (args[0] === "agent" && args[1] === "prompt") {
+            prompted = true;
+            if (outcome === "aborted") controller.abort();
+            if (outcome === "failure") throw new Error("permission denied");
+            throw Object.assign(new Error("prompt acknowledgement timeout"), localTimeout
+              ? { timedOut: true }
+              : { stderr: JSON.stringify({ error: { code: "timeout" } }) });
+          }
+          return { stdout: JSON.stringify({ pane, agent: pane }), stderr: "" };
+        },
+      });
+      const launch = backend.launch({ cwd: "/repo", initialPrompt: "Review.", signal: controller.signal });
+      if (["late", "done"].includes(outcome)) {
+        const handle = await launch;
+        assert.equal(calls.some((args) => args[1] === "close"), false);
+        if (outcome === "done") {
+          const dir = mkdtempSync(join(tmpdir(), "herdr-recovery-"));
+          try {
+            const output = "<status>partial</status><summary>Stopped on edit conflict</summary>";
+            writeFileSync(join(dir, "task.jsonl"), JSON.stringify({ type: "session_info", name: "task" }) + "\n" + JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: output }] } }) + "\n");
+            const result = await waitForTaskCompletion({ sessionDir: dir, sessionName: "task", paneId: handle.resourceId, resourceExists: () => backend.isAlive(handle), timeoutMs: 100, pollMs: 1 });
+            assert.equal(result.status, "completed");
+            assert.equal(result.content, output);
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+        await backend.close(handle);
+        assert.equal(calls.filter((args) => args[1] === "close").length, 1);
+      } else {
+        await assert.rejects(launch, outcome === "inactive" ? /no confirmed lifecycle transition/ : outcome === "replaced" ? /identity/ : outcome === "failure" ? /permission denied/ : /abort/i);
+        if (outcome === "replaced") assert.equal(calls.some((args) => args[1] === "close"), false);
+        if (outcome === "inactive" || outcome === "failure") assert.equal(calls.filter((args) => args[1] === "close").length, 1);
+        if (outcome === "aborted") {
+          assert.equal(reads, 2); // Initial identity and cleanup, no recovery poll.
+          assert.equal(calls.filter((args) => args[1] === "close").length, 1);
+        }
+      }
+      assert.equal(calls.filter((args) => args[1] === "prompt").length, 1);
+      assert.equal(calls.some((args) => args[1] === "send-keys"), false);
+    });
+  }
+}
 
 test("HerdR rejects a dropped retry Enter with no lifecycle transition", async () => {
   const calls: string[][] = [];

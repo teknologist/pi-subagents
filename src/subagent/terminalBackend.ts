@@ -83,8 +83,10 @@ class CommandFailedError extends Error {
     readonly stdout: string,
     readonly stderr: string,
     readonly exitCode?: number,
+    readonly timedOut = false,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = "CommandFailedError";
   }
 }
@@ -112,6 +114,8 @@ export function createDefaultCommandRunner(): CommandRunner {
                   stdout,
                   stderr,
                   typeof error.code === "number" ? error.code : undefined,
+                  Boolean(options.timeoutMs && error.killed && error.signal === "SIGTERM" && !options.signal?.aborted),
+                  error,
                 ),
               );
               return;
