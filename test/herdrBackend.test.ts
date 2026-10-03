@@ -80,6 +80,12 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
     },
     run: async (_command, args, options) => {
       calls.push({ args: [...args], env: options?.env });
+      if (args[0] === "agent" && args[1] === "start") {
+        assert.ok(
+          (options?.timeoutMs ?? 0) > 30_000,
+          "The command runner must outlast Herdr's 30-second readiness wait",
+        );
+      }
       return { stdout: outputs.shift() ?? "", stderr: "" };
     },
   });
@@ -725,6 +731,8 @@ test("HerdR rejects a replacement agent and does not clean up its pane", async (
     /identity|terminal/iu,
   );
   assert.equal(calls.some((args) => args[0] === "pane" && args[1] === "close"), false);
+  assert.equal(calls.filter((args) => args[1] === "prompt").length, 1);
+  assert.equal(calls.filter((args) => args[1] === "send-keys").length, 1);
 });
 
 test("HerdR skips destructive cleanup when initial identity capture fails", async () => {
@@ -1172,7 +1180,7 @@ test("HerdR recovers when startup drops the first Enter", async () => {
         return { stdout: JSON.stringify({ result: { agent: { pane_id: "w1:p2", terminal_id: "term-2", name: "pi-task", agent: "pi", agent_status: retrySent ? "working" : "idle", state_change_seq: retrySent ? 11 : 10 } } }), stderr: "" };
       }
       if (args[0] === "pane" && args[1] === "process-info") return processInfoResult();
-      if (args[0] === "agent" && args[1] === "send-keys") retrySent = ++enters === 2;
+      if (args[0] === "agent" && args[1] === "send-keys") retrySent = ++enters >= 2;
       return { stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
     },
   });
@@ -1180,7 +1188,58 @@ test("HerdR recovers when startup drops the first Enter", async () => {
   await backend.launch({ cwd: "/repo", agentArgs: ["task"], initialPrompt: "Review." });
 
   assert.deepEqual(
-    calls.find((args) => args[0] === "agent" && args[1] === "send-keys"),
-    ["agent", "send-keys", "pi-task", "enter"],
+    calls.filter((args) => args[0] === "agent" && args[1] === "send-keys"),
+    [
+      ["agent", "send-keys", "pi-task", "enter"],
+      ["agent", "send-keys", "pi-task", "enter"],
+    ],
   );
+  assert.equal(calls.filter((args) => args[1] === "prompt").length, 1);
 });
+
+for (const change of ["sequence", "status", "identity"] as const) {
+  test(`HerdR stops delayed Enter recovery after ${change} changes`, async () => {
+    const calls: string[][] = [];
+    let enters = 0;
+    const backend = createHerdrTerminalBackend({
+      retryTimeoutMs: 300,
+      retryPollMs: 1,
+      env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: "/tmp/herdr-delayed-stop.sock" },
+      run: async (_command, args) => {
+        calls.push([...args]);
+        const changed = enters >= 2;
+        if (args[0] === "pane" && args[1] === "split") {
+          return { stdout: JSON.stringify({ pane: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+        }
+        if (args[0] === "agent" && args[1] === "prompt") {
+          throw Object.assign(new Error("prompt stalled"), {
+            stderr: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "state_change_seq remained 10" } }),
+          });
+        }
+        if (args[0] === "agent" && args[1] === "get") {
+          return { stdout: JSON.stringify({ agent: {
+            pane_id: "w1:p2", terminal_id: changed && change === "identity" ? "replacement" : "term-2",
+            name: "pi-task", agent: "pi",
+            // Unknown is not a confirmed transition. Keep observing without input.
+            agent_status: changed && change !== "identity" ? "unknown" : "idle",
+            state_change_seq: changed && change === "sequence" ? 11 : 10,
+          } }), stderr: "" };
+        }
+        if (args[0] === "pane" && args[1] === "process-info") return processInfoResult();
+        if (args[0] === "agent" && args[1] === "send-keys") enters += 1;
+        return { stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+      },
+    });
+
+    await assert.rejects(
+      backend.launch({ cwd: "/repo", initialPrompt: "Review." }),
+      change === "identity" ? /identity changed/ : /no confirmed lifecycle transition/,
+    );
+    assert.equal(calls.filter((args) => args[1] === "prompt").length, 1);
+    assert.deepEqual(calls.filter((args) => args[1] === "send-keys"), [
+      ["agent", "send-keys", "pi-task", "enter"],
+      ["agent", "send-keys", "pi-task", "enter"],
+    ]);
+    assert.equal(calls.some((args) => args[1] === "close"), false);
+  });
+}
