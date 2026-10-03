@@ -311,8 +311,12 @@ async function waitForRetryTransition(
   timeoutMs: number,
   pollMs: number,
   signal?: AbortSignal,
+  retryEnter = false,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const enterDelay = Math.min(5_000, timeoutMs / 3);
+  let nextEnter = Date.now() + enterDelay;
+  let enters = 0;
   while (true) {
     let current: HerdrAgentInfo;
     try {
@@ -323,6 +327,9 @@ async function waitForRetryTransition(
       );
     }
     assertSameAgentIdentity(expected, current);
+    if (current.state_change_seq !== baseline || current.agent_status !== "idle") {
+      retryEnter = false;
+    }
     if (
       current.state_change_seq > baseline &&
       isSettledPromptState(current.agent_status)
@@ -333,6 +340,16 @@ async function waitForRetryTransition(
       throw new Error(
         `HerdR retry produced no confirmed lifecycle transition for ${expected.pane_id}`,
       );
+    }
+    if (retryEnter && enters < 2 && Date.now() >= nextEnter && current.name) {
+      if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
+      try {
+        await run(["agent", "send-keys", current.name, "enter"]);
+      } catch (error) {
+        throw new HerdrIdentityError(`HerdR could not verify retry submission: ${errorText(error)}`);
+      }
+      enters += 1;
+      nextEnter = Date.now() + enterDelay;
     }
     await sleep(pollMs, signal);
   }
@@ -377,9 +394,9 @@ async function retryStalledPrompt(
     );
     return;
   }
-  if (!beforeRetry.name) {
+  if (!beforeRetry.name || beforeRetry.agent_status !== "idle") {
     throw new HerdrIdentityError(
-      `HerdR cannot safely retry an unnamed agent in ${promptIdentity.pane_id}`,
+      `HerdR cannot safely retry an unnamed or non-idle agent in ${promptIdentity.pane_id}`,
     );
   }
   try {
@@ -396,6 +413,7 @@ async function retryStalledPrompt(
     timeoutMs,
     pollMs,
     signal,
+    true,
   );
 }
 
@@ -606,7 +624,7 @@ export function createHerdrTerminalBackend(
   const runner = options.run ?? createDefaultCommandRunner().run;
   const socketPath = env.HERDR_SOCKET_PATH;
   const promptTimeoutMs = options.promptTimeoutMs ?? 8_000;
-  const retryTimeoutMs = options.retryTimeoutMs ?? promptTimeoutMs;
+  const retryTimeoutMs = options.retryTimeoutMs ?? 30_000;
   const retryPollMs = options.retryPollMs ?? 100;
   const commandEnv = { ...env, HERDR_SOCKET_PATH: socketPath };
   const run = (
@@ -672,7 +690,12 @@ export function createHerdrTerminalBackend(
           );
         }
         const launchRun = (args: readonly string[]) =>
-          run(args, { signal: input.signal, timeoutMs: input.timeoutMs });
+          run(args, {
+            signal: input.signal,
+            timeoutMs: input.timeoutMs ?? (args[0] === "agent" && args[1] === "start"
+              ? 35_000
+              : args[0] === "agent" && args[1] === "prompt" ? promptTimeoutMs + 2_000 : undefined),
+          });
         if (input.herdrLayout === "tab" && input.workspaceGroup) {
           throw new Error("HerdR tab layout cannot use workspace_group");
         }

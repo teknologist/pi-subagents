@@ -1144,3 +1144,43 @@ test("HerdR transport failures are not reported as dead panes", async () => {
       error instanceof Error && error.name === "HerdrUnavailableError",
   );
 });
+
+test("HerdR recovers when startup drops the first Enter", async () => {
+  const calls: string[][] = [];
+  let retrySent = false;
+  let enters = 0;
+  const backend = createHerdrTerminalBackend({
+    promptTimeoutMs: 5_001,
+    retryTimeoutMs: 100,
+    retryPollMs: 1,
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr-retry.sock",
+    },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") {
+        return { stdout: JSON.stringify({ pane: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+      }
+      if (args[0] === "agent" && args[1] === "prompt") {
+        throw Object.assign(new Error("prompt stalled"), {
+          stderr: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "agent prompt produced no observed state change within 5000 ms; status is idle and state_change_seq remained 10" } }),
+        });
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return { stdout: JSON.stringify({ result: { agent: { pane_id: "w1:p2", terminal_id: "term-2", name: "pi-task", agent: "pi", agent_status: retrySent ? "working" : "idle", state_change_seq: retrySent ? 11 : 10 } } }), stderr: "" };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") return processInfoResult();
+      if (args[0] === "agent" && args[1] === "send-keys") retrySent = ++enters === 2;
+      return { stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2" } }), stderr: "" };
+    },
+  });
+
+  await backend.launch({ cwd: "/repo", agentArgs: ["task"], initialPrompt: "Review." });
+
+  assert.deepEqual(
+    calls.find((args) => args[0] === "agent" && args[1] === "send-keys"),
+    ["agent", "send-keys", "pi-task", "enter"],
+  );
+});
